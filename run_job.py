@@ -32,38 +32,73 @@ def _require_blocking_scheduler():
     return BlockingScheduler
 
 
+_CRON_KEYS = ("year", "month", "day", "day_of_week", "hour", "minute", "second", "week")
+
+
+def _build_cron_kwargs(schedule_cfg: dict, hour_override=None, minute_override=None) -> dict:
+    """从 schedule 配置抽取 APScheduler cron 字段。"""
+    cron = {k: v for k, v in schedule_cfg.items() if k in _CRON_KEYS}
+    if hour_override is not None:
+        cron["hour"] = hour_override
+    if minute_override is not None:
+        cron["minute"] = minute_override
+    cron.setdefault("second", 0)
+    return cron
+
+
 def start_scheduler(
-    pipeline_name: str = "daily",
+    pipeline_name: str | None = None,
     hour: int | None = None,
     minute: int | None = None,
 ) -> None:
-    """启动 BlockingScheduler，每天执行指定 pipeline。"""
-    from data_collect.pipeline import run_pipeline
+    """启动 BlockingScheduler，注册所有有 schedule 段的 pipeline。
+
+    pipeline_name=None：注册全部 pipeline；指定时仅注册该 pipeline。
+    hour/minute 仅在指定单 pipeline 时生效（覆盖配置）。
+    """
+    from data_collect.pipeline import run_pipeline, print_dag
     from data_collect.config import get_pipeline_config
 
     pipelines = get_pipeline_config()
-    pipeline_cfg = pipelines.get(pipeline_name, {})
-    schedule_cfg = pipeline_cfg.get("schedule", {})
-    hour = hour if hour is not None else schedule_cfg.get("hour", 15)
-    minute = minute if minute is not None else schedule_cfg.get("minute", 30)
-    timezone = schedule_cfg.get("timezone", "Asia/Shanghai")
 
-    from data_collect.pipeline import print_dag
-    print_dag(pipeline_name)
+    if pipeline_name:
+        if pipeline_name not in pipelines:
+            print(f"错误：pipeline '{pipeline_name}' 不存在，可用: {list(pipelines.keys())}")
+            return
+        targets = {pipeline_name: pipelines[pipeline_name]}
+    else:
+        targets = {n: c for n, c in pipelines.items() if c.get("schedule")}
+
+    if not targets:
+        print("错误：未找到任何带 schedule 段的 pipeline")
+        return
+
+    timezone = next(iter(targets.values())).get("schedule", {}).get("timezone", "Asia/Shanghai")
 
     BlockingScheduler = _require_blocking_scheduler()
     scheduler = BlockingScheduler(timezone=timezone)
-    scheduler.add_job(
-        run_pipeline,
-        trigger="cron",
-        hour=hour,
-        minute=minute,
-        second=0,
-        kwargs={"pipeline_name": pipeline_name},
-        id=f"{pipeline_name}_pipeline_job",
-        replace_existing=True,
-    )
-    print(f"定时任务已启动：每天 {hour:02d}:{minute:02d} 执行 {pipeline_name} pipeline")
+
+    for name, cfg in targets.items():
+        sch = cfg.get("schedule", {})
+        if pipeline_name and (hour is not None or minute is not None):
+            cron_kwargs = _build_cron_kwargs(sch, hour, minute)
+        else:
+            cron_kwargs = _build_cron_kwargs(sch)
+
+        scheduler.add_job(
+            run_pipeline,
+            trigger="cron",
+            # show_dag=False：DAG 已在启动时展示，cron 触发时无需再印
+            kwargs={"pipeline_name": name, "show_dag": False},
+            id=f"{name}_pipeline_job",
+            replace_existing=True,
+            **cron_kwargs,
+        )
+        cron_str = " ".join(f"{k}={v}" for k, v in cron_kwargs.items())
+        print(f"  [OK] 已注册: {name}  [{cron_str}]")
+        print_dag(name)
+
+    print(f"\n定时任务启动完毕，共 {len(targets)} 个 pipeline，时区 {timezone}")
     scheduler.start()
 
 
@@ -134,8 +169,8 @@ def parse_args() -> argparse.Namespace:
         help="补历史结束日期 YYYYMMDD（仅 backfill 模式）",
     )
     parser.add_argument(
-        "--pipeline", default="daily",
-        help="指定 pipeline 名称（默认 daily）",
+        "--pipeline", default=None,
+        help="指定 pipeline 名称（pipeline/once 模式默认 daily；scheduler 模式默认全部注册）",
     )
     parser.add_argument(
         "--hour", type=int, default=None,
@@ -166,7 +201,7 @@ def main() -> None:
     if args.mode == "pipeline":
         from data_collect.pipeline import run_pipeline
         results = run_pipeline(
-            pipeline_name=args.pipeline,
+            pipeline_name=args.pipeline or "daily",
             run_date=args.date,
             only_task=args.task,
             limit_stocks=args.limit_stocks,
@@ -220,7 +255,7 @@ def main() -> None:
 
     from data_collect.pipeline import run_pipeline
     results = run_pipeline(
-        pipeline_name=args.pipeline,
+        pipeline_name=args.pipeline or "daily",
         run_date=args.date,
         only_task="a_share_minute",
         limit_stocks=args.limit_stocks,

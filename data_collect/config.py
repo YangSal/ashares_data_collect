@@ -57,6 +57,10 @@ def get_tick_config() -> Dict[str, Any]:
     return dict(_load_config().get("tick_storage", {}))
 
 
+def get_qmt_config() -> Dict[str, Any]:
+    return dict(_load_config().get("qmt", {}))
+
+
 def reload_config() -> None:
     """强制重新加载配置（测试时使用）。"""
     global _config_cache

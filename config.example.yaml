@@ -19,41 +19,130 @@ tick_storage:
   base_dir: "Z:\\A股冷数据\\TICK"
   compression: "zstd"
 
+qmt:
+  # QMT 安装目录；清理任务清空 {install_dir}\userdata_mini\datadir（本地行情缓存）
+  install_dir: "D:\\国金QMT交易端模拟"
+
 pipelines:
+  # 每日 15:30 主流水线
   daily:
     schedule:
       hour: 15
       minute: 30
       timezone: "Asia/Shanghai"
+    # timeout（秒）+ retries：xtquant 挂死时硬杀子进程并重试 N 次，仍失败发钉钉
     tasks:
+      - name: a_share_daily
+        job: data_collect.jobs.a_share_daily
+        platform: windows
+        timeout: 900
+        retries: 1
+      - name: wave3
+        job: data_collect.jobs.wave3
+        platform: windows
+        depends_on: [a_share_daily]
+        timeout: 300
+        retries: 1
       - name: a_share_minute
         job: data_collect.jobs.a_share_minute
         platform: windows
+        depends_on: [a_share_daily]
+        timeout: 1200
+        retries: 1
       - name: divid_factors
         job: data_collect.jobs.divid_factors
         platform: windows
         depends_on: [a_share_minute]
-      - name: a_share_daily
-        job: data_collect.jobs.a_share_daily
-        platform: windows
-        depends_on: [divid_factors]
+        timeout: 300
+        retries: 1
       - name: a_share_instrument
         job: data_collect.jobs.a_share_instrument
         platform: windows
-        depends_on: [a_share_daily]
+        depends_on: [divid_factors]
+        timeout: 300
+        retries: 1
       - name: a_share_sector
         job: data_collect.jobs.a_share_sector
         platform: windows
         depends_on: [a_share_instrument]
+        timeout: 300
+        retries: 1
       - name: a_share_index_weight
         job: data_collect.jobs.a_share_index_weight
         platform: windows
         depends_on: [a_share_sector]
+        timeout: 300
+        retries: 1
       - name: a_share_tick
         job: data_collect.jobs.a_share_tick
         platform: windows
         depends_on: [a_share_index_weight]
+        timeout: 2400
+        retries: 1
+
+  # 周六 8:00 — tick 查漏补缺最近 5 个交易日
+  weekly_tick_verify:
+    schedule:
+      day_of_week: sat
+      hour: 8
+      minute: 0
+      timezone: "Asia/Shanghai"
+    tasks:
+      - name: a_share_tick
+        job: data_collect.jobs.a_share_tick
+        platform: windows
+        fn: run_verify
+        days_back: 5
+        timeout: 3600
+        retries: 1
+
+  # 周日 8:00 — daily/minute K线查漏补缺最近 10 个交易日
+  weekly_kline_verify:
+    schedule:
+      day_of_week: sun
+      hour: 8
+      minute: 0
+      timezone: "Asia/Shanghai"
+    tasks:
+      - name: a_share_daily
+        job: data_collect.jobs.a_share_daily
+        platform: windows
+        fn: run_verify
+        days_back: 10
+        timeout: 1800
+        retries: 1
+      - name: a_share_minute
+        job: data_collect.jobs.a_share_minute
+        platform: windows
+        fn: run_verify
+        days_back: 10
+        timeout: 3600
+        retries: 1
+
+  # 每月最后一天 23:00 — 财务数据更新
+  monthly_financial:
+    schedule:
+      day: last
+      hour: 23
+      minute: 0
+      timezone: "Asia/Shanghai"
+    tasks:
       - name: a_share_financial
         job: data_collect.jobs.a_share_financial
         platform: windows
-        depends_on: [a_share_tick]
+        timeout: 5400
+        retries: 1
+
+  # 每月1号 23:00 — 清理 QMT 本地缓存（datadir 累积的可重下行情缓存）
+  monthly_qmt_clean:
+    schedule:
+      day: 1
+      hour: 23
+      minute: 0
+      timezone: "Asia/Shanghai"
+    tasks:
+      - name: clean_qmt_cache
+        job: data_collect.jobs.clean_qmt_cache
+        platform: windows
+        timeout: 1800
+        retries: 0

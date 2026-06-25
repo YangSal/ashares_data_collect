@@ -1,6 +1,9 @@
 # Project config (contains credentials)
 config.yaml
 
+# 草稿 / 探索 notebook（不入库）
+tests/test.ipynb
+
 # CSV export output
 tempdata/
 

@@ -1,0 +1,14 @@
+# 统一文本文件行尾为 LF（跨平台 Windows + Linux 一致，消除 Windows CRLF 假修改噪音）
+* text=auto eol=lf
+
+# 二进制文件：不做行尾转换
+*.parquet binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.gz binary
+*.zip binary
+*.xlsx binary
+*.xls binary

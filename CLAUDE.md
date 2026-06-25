@@ -11,7 +11,7 @@ wave3 选股策略（3浪3技术指标筛选）。未来扩展爬虫、非结构
 ## Python Environment
 
 ```bash
-C:\Users\yangming\.conda\envs\py10\python.exe  # conda activate py10
+C:\Users\ym_cs\.conda\envs\py10\python.exe  # conda activate py10
 ```
 
 ## Commands
@@ -31,8 +31,8 @@ python run_job.py --mode once [--date YYYYMMDD] [--limit-stocks N]
 # 仅导出CSV
 python run_job.py --mode export-only [--date YYYYMMDD]
 
-# 启动定时任务（每天执行 daily pipeline）
-python run_job.py --mode scheduler [--hour H] [--minute M]
+# 启动定时任务（默认注册全部带 schedule 的 pipeline；--pipeline X 只注册其一）
+python run_job.py --mode scheduler [--pipeline NAME] [--hour H] [--minute M]
 
 # 运行测试
 pytest tests/ -v
@@ -72,14 +72,29 @@ sql/                       # 建表SQL
 
 ### Pipeline 编排
 
-任务依赖在 `config.yaml` 的 `pipelines` 段定义，框架自动拓扑排序执行。
-每个 job 模块必须实现 `run(run_date: str, **kwargs) -> str` 标准接口。
-支持 `platform: windows/linux` 标记，当前平台不匹配的任务自动跳过。
+任务依赖在 `config.yaml` 的 `pipelines.<name>` 段定义，框架自动拓扑排序执行。
+支持多 pipeline 多 cron：每个 pipeline 有独立 `schedule`（hour/minute/day_of_week/day），
+scheduler 启动时一次注册全部。当前 4 个：`daily`、`weekly_tick_verify`、`weekly_kline_verify`、`monthly_financial`。
+
+每个 job 模块至少实现 `run(run_date, **kwargs) -> str`；
+查漏补缺任务还需实现 `run_verify(start_date, end_date, **kwargs) -> str`。
+
+任务级配置字段：
+- `platform: windows/linux` — 平台过滤，不匹配自动跳过
+- `depends_on: [...]` — 上游依赖
+- `fn: run_verify` — 调用 run_verify（默认 run），自动从 `days_back` 推算 start/end
+- `timeout: 秒` — 子进程超时，超时硬杀 worker 释放 xtquant 资源
+- `retries: N` — 超时/失败重试次数（每次新建子进程），重试间发钉钉警告
+
+scheduler 启动时用 phart+networkx 在终端打印每个 pipeline 的 ASCII DAG。
+
+`run_pipeline(show_dag=True)` 默认打印 DAG；scheduler 注册的 cron job 传 `show_dag=False`，
+避免每次触发重复打印（DAG 已在启动时展示）。
 
 ### 新增任务步骤
 
-1. 在 `data_collect/jobs/` 下创建模块，实现 `run()` 函数（可选 `run_backfill()`）
-2. 在 `config.yaml` 的 `pipelines.daily.tasks` 中添加任务定义
+1. 在 `data_collect/jobs/` 下创建模块，实现 `run()` 函数（可选 `run_backfill()`、`run_verify()`）
+2. 在 `config.yaml` 的对应 `pipelines.<name>.tasks` 中添加任务定义（含 timeout/retries）
 3. 如需建表，在 `sql/` 下添加 SQL 文件
 
 ## Configuration
@@ -90,9 +105,12 @@ sql/                       # 建表SQL
 ## Key Details
 
 - 任务在子进程中执行（`ProcessPoolExecutor(max_workers=1)`），确保资源释放
+- 子进程超时硬杀：依赖 `executor._processes`（CPython 私有属性）terminate→join→kill 释放 xtquant
 - DB字段对齐是动态的：运行时读取 `information_schema.columns`
 - 股票代码格式转换：`000001.SZ` → `sz000001`(8字符) 或 `000001`(6字符)
 - xtdata时间戳为UTC毫秒，+8小时转北京时间
 - 钉钉消息必须包含"白白胖胖说"
-- Pipeline 失败任务会跳过其下游任务，汇总结果发钉钉通知
-- Tick数据按 年/月/日/股票代码.parquet 存储，Parquet+zstd 压缩，幂等写入（已存在则跳过）
+- Pipeline 失败任务会跳过其下游任务，汇总结果发钉钉通知（含失败任务错误首行 `↳ ...`）
+- a_share_tick `run()` 不传 `--date` 时默认下载上一交易日（当天 tick 经常不可用）
+- Tick数据按 年/月/日.parquet **当日打包**存储（单文件含当日全部股票，列含 stock_code），Parquet+zstd，按 row-group 增量写入+原子落盘；按日幂等（当日文件存在则跳过）。无数据日写 `.empty` 标记避免 verify 反复重试（删除可强制重试）。读取用 `read_tick(trade_date, stock_code=None)`
+- QMT 服务器对 tick(分笔) 仅保留约近 3~4 周，过期日期 `download_history_data2` 静默返回空、无法补下（故 tick 须及时采集）
