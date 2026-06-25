@@ -1,0 +1,59 @@
+database:
+  host: "192.168.x.x"
+  port: 5432
+  user: "your_user"
+  password: "your_password"
+  database: "ashares"
+
+dingtalk:
+  webhook_token: "your_token_here"
+  message_prefix: "白白胖胖说"
+
+export:
+  enable_csv: false
+  base_dir: "tempdata"
+  table_name: "minutedata_tdx"
+  divid_factors_table: "divid_factors"
+
+tick_storage:
+  base_dir: "Z:\\A股冷数据\\TICK"
+  compression: "zstd"
+
+pipelines:
+  daily:
+    schedule:
+      hour: 15
+      minute: 30
+      timezone: "Asia/Shanghai"
+    tasks:
+      - name: a_share_minute
+        job: data_collect.jobs.a_share_minute
+        platform: windows
+      - name: divid_factors
+        job: data_collect.jobs.divid_factors
+        platform: windows
+        depends_on: [a_share_minute]
+      - name: a_share_daily
+        job: data_collect.jobs.a_share_daily
+        platform: windows
+        depends_on: [divid_factors]
+      - name: a_share_instrument
+        job: data_collect.jobs.a_share_instrument
+        platform: windows
+        depends_on: [a_share_daily]
+      - name: a_share_sector
+        job: data_collect.jobs.a_share_sector
+        platform: windows
+        depends_on: [a_share_instrument]
+      - name: a_share_index_weight
+        job: data_collect.jobs.a_share_index_weight
+        platform: windows
+        depends_on: [a_share_sector]
+      - name: a_share_tick
+        job: data_collect.jobs.a_share_tick
+        platform: windows
+        depends_on: [a_share_index_weight]
+      - name: a_share_financial
+        job: data_collect.jobs.a_share_financial
+        platform: windows
+        depends_on: [a_share_tick]

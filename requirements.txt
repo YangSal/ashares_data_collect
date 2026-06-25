@@ -1,0 +1,11 @@
+pandas
+pyarrow
+requests
+chinese_calendar
+pyyaml
+psycopg2-binary
+apscheduler
+tqdm
+tenacity
+phart
+pytest
