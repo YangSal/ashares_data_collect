@@ -769,7 +769,7 @@ NAS 不可用时同格式降级落本地 **spool 目录** + 钉钉告警，**入
 git clone <repo> && cd data_collect && pip install -r requirements.txt
 
 # 2. 挂载 NAS（SMB）→ archive_base_posix 指向的挂载点；注意 uid 让运行用户可写
-sudo mount -t cifs //192.168.9.12/media /mnt/media \
+sudo mount -t cifs //192.168.1.12/media /mnt/media \
   -o credentials=/root/.smbcred,uid=$(whoami),gid=$(whoami),file_mode=0664,dir_mode=0775,vers=3.0
 # 开机自挂：把等价行加进 /etc/fstab（加 _netdev,nofail）
 
