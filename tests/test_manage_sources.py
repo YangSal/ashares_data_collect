@@ -45,3 +45,14 @@ def test_test_unsupported_source(monkeypatch, capsys):
     monkeypatch.setattr(ms.sr, "get_source", lambda i: _src(adapter="akshare"))
     assert ms.main(["test", "s1"]) == 2
     assert "冒烟失败" in capsys.readouterr().out
+
+
+def test_test_official_source_reports_smoke_result(monkeypatch, capsys):
+    """CLI 必须把官方源冒烟结果原样呈现，而不是误报不支持。"""
+    from data_collect.utils import source_adapters as sa
+    source = _src(id="bse_regulation", adapter="api",
+                  job="news_regulator", url="https://www.bse.cn/x")
+    monkeypatch.setattr(ms.sr, "get_source", lambda _id: source)
+    monkeypatch.setattr(sa, "smoke_test", lambda _source: "6 条 | 首条: 监管动态")
+    assert ms.main(["test", "bse_regulation"]) == 0
+    assert "6 条" in capsys.readouterr().out

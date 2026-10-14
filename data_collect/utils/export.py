@@ -11,15 +11,15 @@ from data_collect.config import get_export_config
 
 
 def export_stock_csvs(
-    df: pd.DataFrame, trade_date: str, base_dir: str | None = None
+    df: pd.DataFrame, trade_date: str, base_dir: str | None = None, *, force: bool = False
 ) -> Tuple[Path | None, int]:
     """
     将最终入库数据按股票导出为 CSV：base_dir/交易日/股票代码.csv
     返回：导出目录（None 表示未导出）、导出股票文件数。
-    config 中 enable_csv=false 时跳过导出。
+    config 中 enable_csv=false 时跳过自动导出；显式 export-only 可传 force=True。
     """
     export_cfg = get_export_config()
-    if not export_cfg.get("enable_csv", False):
+    if not force and not export_cfg.get("enable_csv", False):
         return None, 0
 
     if base_dir is None:

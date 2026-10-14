@@ -11,6 +11,7 @@ QMT 运行时会锁定部分文件：清理时逐个删除，跳过被占用/无
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 from data_collect.config import get_qmt_config
@@ -19,6 +20,10 @@ logger = logging.getLogger(__name__)
 
 # datadir 相对 install_dir 的子路径
 _CACHE_SUBPATH = ("userdata_mini", "datadir")
+
+
+def _native_backend() -> bool:
+    return os.environ.get('DATA_COLLECT_QMT_BACKEND', get_qmt_config().get('backend', 'native')) == 'native'
 
 
 def _cache_dir() -> Path:
@@ -35,6 +40,9 @@ def clean_cache(dry_run: bool = False) -> tuple[int, int, int]:
     返回 (释放字节数, 删除文件数, 跳过文件数)。逐个删除、自底向上删空目录，
     跳过被占用/无权限的文件（QMT 运行中会锁部分文件）。
     """
+    if not _native_backend():
+        logger.info('QMT 桥接模式：跳过原生缓存清理')
+        return 0, 0, 0
     base = _cache_dir()
     if not base.exists():
         return 0, 0, 0
@@ -66,6 +74,8 @@ def run(run_date: str | None = None, **kwargs) -> str:
     kwargs 支持 `dry_run=True`（只统计不删）。返回结果消息，由 pipeline 汇总发钉钉。
     """
     dry_run = bool(kwargs.get("dry_run", False))
+    if not _native_backend():
+        return 'QMT 桥接模式：跳过缓存清理，保留人工预下载及回退缓存。'
     base = _cache_dir()
     if not base.exists():
         msg = f"QMT缓存清理：目录不存在，跳过（{base}）。"

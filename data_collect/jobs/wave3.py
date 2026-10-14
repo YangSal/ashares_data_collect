@@ -20,12 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
-import smtplib
 import tempfile
-from email.mime.base import MIMEBase
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email import encoders
 from typing import List
 
 import numpy as np
@@ -38,7 +33,7 @@ from data_collect.utils.date_utils import is_market_day, date_range, add_mark_da
 from data_collect.utils.db import get_connection, require_psycopg2
 from data_collect.utils.df_utils import normalize_trade_date
 from data_collect.utils.indicators import kd
-from data_collect.utils.notify import send_dingtalk
+from data_collect.utils.notify import send_dingtalk, send_email
 
 logger = logging.getLogger(__name__)
 
@@ -456,38 +451,14 @@ def _format_summary(trade_date: str, df_res: pd.DataFrame, inserted: int) -> str
 def _send_email(subject: str, body: str, attachment_path: str | None = None) -> None:
     """通过 QQ 邮箱发送文本，可附带 Excel 附件。"""
     cfg = _get_wave3_config().get("email", {})
-    sender = cfg.get("sender", "")
-    app_key = cfg.get("app_key", "")
     recipients = cfg.get("recipients", [])
-    smtp_server = cfg.get("smtp_server", "smtp.qq.com")
-    smtp_port = cfg.get("smtp_port", 465)
 
-    if not sender or not app_key or not recipients:
+    if not cfg.get("sender") or not cfg.get("app_key") or not recipients:
         logger.warning("邮件配置不完整，跳过发送")
         return
 
     try:
-        msg = MIMEMultipart()
-        msg["From"] = sender
-        msg["To"] = ",".join(recipients)
-        msg["Subject"] = subject
-        msg.attach(MIMEText(body, "plain", "utf-8"))
-
-        if attachment_path and os.path.isfile(attachment_path):
-            with open(attachment_path, "rb") as f:
-                part = MIMEBase("application", "octet-stream")
-                part.set_payload(f.read())
-            encoders.encode_base64(part)
-            fname = os.path.basename(attachment_path)
-            part.add_header(
-                "Content-Disposition", "attachment",
-                filename=("utf-8", "", fname),
-            )
-            msg.attach(part)
-
-        with smtplib.SMTP_SSL(smtp_server, smtp_port) as smtp:
-            smtp.login(sender, app_key)
-            smtp.sendmail(sender, recipients, msg.as_string())
+        send_email(subject, body, cfg, recipients, attachment_path=attachment_path)
         logger.info("邮件发送成功")
     except Exception as exc:
         logger.warning(f"邮件发送失败: {exc}")

@@ -3,6 +3,8 @@
 用法：
   python run_news.py                                # 启动调度（注册全部新闻 pipeline，默认）
   python run_news.py --pipeline news_daily          # 只调度指定新闻 pipeline（逗号可分隔多个）
+  python run_news.py --mode pipeline --pipeline news_digest
+                                                    # 手动补发最近完整18:00窗口日报
   python run_news.py --mode pipeline --pipeline news_daily [--date YYYYMMDD] [--task NAME]
                                                     # 立即执行一条新闻 pipeline（调试/补跑）
   python run_news.py --mode backfill --task news_cctv --start 20260601 --end 20260701
@@ -18,6 +20,8 @@ data_collect.pipeline.run_pipeline），本文件只做入口收窄。
 from __future__ import annotations
 
 import argparse
+
+from data_collect.utils.news_digest import enable_digest_mode
 
 from run_job import (  # 单一事实源：常量与执行函数均复用 run_job
     NEWS_PIPELINES,
@@ -48,6 +52,9 @@ def _validate_task(task: str | None, mode: str) -> None:
 
 
 def main() -> None:
+    # 必须早于 scheduler/pipeline/backfill/verify 的任何任务调用；环境变量会被
+    # ProcessPoolExecutor 子进程继承，使源级 send_dingtalk 同样改为写事件账本。
+    enable_digest_mode()
     parser = argparse.ArgumentParser(
         description="新闻采集系统入口（独立于行情 run_job.py）")
     parser.add_argument(
