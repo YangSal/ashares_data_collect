@@ -122,6 +122,31 @@ def test_run_all_failed_raises(env, monkeypatch):
         nus.run()
 
 
+def test_run_proxy_missing_source_skipped(env, monkeypatch):
+    """声明代理但本节点无代理的源 → 让位跳过：不失败不告警，其余源照采（A4）。"""
+    feeds = dict(_TEST_FEEDS)
+    feeds["sec_8k"] = Source(id="sec_8k", adapter="rss", channel="us_filing",
+                             job="news_us", url="https://sec.example/atom",
+                             proxy_name="us", proxy_url="")
+    monkeypatch.setattr(nus, "_rss_sources", lambda: feeds)
+    summary = nus.run()
+    assert "sec_8k 让位" in summary and "让位跳过[sec_8k]" in summary
+    assert env.calls.alerts == []                        # 让位≠失败，不告警
+    docs = env.calls.bulk[0]
+    assert {d["source"] for d in docs} == {"fed"}        # 其余源照采
+
+
+def test_run_all_proxy_missing_returns_quietly(env, monkeypatch):
+    """全部源让位（无代理节点只配了美国源）→ 静默返回摘要，不 raise 不告警（A4）。"""
+    feeds = {sid: Source(id=sid, adapter="rss", channel=s.channel, job="news_us",
+                         url=s.url, proxy_name="us", proxy_url="")
+             for sid, s in _TEST_FEEDS.items()}
+    monkeypatch.setattr(nus, "_rss_sources", lambda: feeds)
+    summary = nus.run()
+    assert "让位跳过" in summary
+    assert env.calls.bulk == [] and env.calls.alerts == []
+
+
 def test_redact_strips_proxy_credentials():
     """代理 URL 的 user:pass@ 段进钉钉前必须脱敏（S5）。"""
     msg = "ProxyError: http://alice:s3cr3t@127.0.0.1:7890 refused"

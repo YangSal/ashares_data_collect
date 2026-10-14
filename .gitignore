@@ -214,3 +214,16 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# 本地实际配置（含数据库口令/钉钉 token；由 config.example.yaml 复制而来，严禁入库）
+config.yaml
+config.local.yaml
+
+# 节点本地差异配置（代理地址/通知开关/调度强度；顶层键浅合并覆盖 config.yaml）
+config.*.local.yaml
+
+# 新闻子系统运行时本地状态（18:00 汇总事件账本、NAS 故障本地暂存）
+output/news_digest.sqlite3
+output/news_digest.sqlite3-wal
+output/news_digest.sqlite3-shm
+news_spool/

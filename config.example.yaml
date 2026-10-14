@@ -8,6 +8,7 @@ database:
 dingtalk:
   webhook_token: "your_token_here"
   message_prefix: "XXXX"
+  enabled: true      # 节点静默开关：false=只记日志不发送（config.local.yaml 每节点覆盖）
 
 export:
   enable_csv: false
@@ -18,6 +19,15 @@ export:
 tick_storage:
   base_dir: "Z:\\A股冷数据\\TICK"
   compression: "zstd"
+
+# wave3 与新闻日报共用 SMTP 发件账号；新闻日报收件人由 news.digest 单独指定。
+wave3:
+  email:
+    smtp_server: "smtp.qq.com"
+    smtp_port: 465
+    sender: "your_sender@qq.com"
+    app_key: "your_smtp_app_key"
+    recipients: ["wave3_recipient@example.com"]
 
 qmt:
   # QMT 安装目录；清理任务清空 {install_dir}\userdata_mini\datadir（本地行情缓存）
@@ -37,8 +47,16 @@ news:
   archive_base_posix: "/mnt/media/A股冷数据/news"  # Linux 用此（SMB/NAS 挂载点）——平台自动选
   # spool_dir: "D:\\path\\to\\news_spool"  # 可选，NAS 故障时本地暂存目录（缺省 <项目根>/news_spool）
   verify_days_back: 3                    # verify 自然日回溯天数
+  digest:
+    event_db: "output/news_digest.sqlite3" # 任务/告警/投递状态本地账本
+    email_recipient: "your_email@example.com"    # 新闻日报唯一收件人
+    retention_days: 30
+    dingtalk_max_chars: 18000
   # flash_sources: [cls, em]             # 快讯生效源（可用 cls/em/sina；某源挂死时切换，零代码）
-  # rsshub_base: "http://192.168.9.10:1200"  # 自建 RSSHub（news_regulator 的 rsshub 类源；不配则该类源计失败）
+  # rsshub_bases:                         # 自建 RSSHub 有序实例；主故障才尝试备用
+  #   - "http://192.168.1.10:1200"
+  #   - "http://192.168.1.11:1200"
+  # rsshub_base: "http://192.168.1.10:1200"  # 旧版兼容键；配置列表时列表优先
   # us_proxy: "http://127.0.0.1:7890"        # 美国源专用代理（仅 news_us 显式使用，其他 job 不碰）
   embedding:
     enabled: true                        # false=向量延迟(news_embed 空转,vec_status 留 pending 省储存),日后改 true 补算
@@ -46,7 +64,7 @@ news:
     model: "BAAI/bge-m3"                 # local=HF 名；ollama 时用 Ollama 模型名（如 "bge-m3"）
     device: "cpu"
     batch_size: 32
-    # ollama_url: "http://192.168.9.12:11434"  # backend=ollama 时必填
+    # ollama_url: "http://192.168.1.12:11434"  # backend=ollama 时必填
   watch_stocks: []                       # 个股新闻关注池（二期）
   rss_sources: []                        # RSSHub/RSS 源清单（二期）
 
@@ -226,14 +244,14 @@ pipelines:
 
   # 新闻快讯 */15 分钟（成功静默，失败照发）
   news_flash:
-    schedule: {minute: "*/15", timezone: "Asia/Shanghai"}
+    schedule: {minute: "*/15", timezone: "Asia/Shanghai", jitter: 600}
     notify: on_failure
     tasks:
       - {name: news_flash, job: data_collect.jobs.news_flash, timeout: 240, retries: 1}
 
   # 新闻小时级 :37 错峰——政策RSS → 个股全文 → 公告PDF → 补向量（串行避免带宽争抢）
   news_hourly:
-    schedule: {minute: 37, timezone: "Asia/Shanghai"}
+    schedule: {minute: 37, timezone: "Asia/Shanghai", jitter: 600}
     notify: on_failure
     tasks:
       - {name: news_policy, job: data_collect.jobs.news_policy, timeout: 300, retries: 1}
@@ -246,10 +264,17 @@ pipelines:
       - {name: news_embed, job: data_collect.jobs.news_embed, timeout: 900, retries: 1,
          depends_on: [news_announce_pdf]}
 
-  # 新闻每日 20:40——联播采集+verify+快讯重放+日报（保留成功汇总）
+  # 新闻通知日报：前日18:00（含）至当日18:00（不含），无 jitter
+  news_digest:
+    schedule: {hour: 18, minute: 0, timezone: "Asia/Shanghai"}
+    tasks:
+      - {name: news_digest, job: data_collect.jobs.news_report,
+         timeout: 180, retries: 2}
+
+  # 新闻每日 20:40——联播采集+verify+快讯重放
   # 注：news 系 verify 忽略框架交易日窗口，按 news.verify_days_back 自然日回溯，故不写 days_back（框架不透传，写了是死配置）
   news_daily:
-    schedule: {hour: 20, minute: 40, timezone: "Asia/Shanghai"}
+    schedule: {hour: 20, minute: 40, timezone: "Asia/Shanghai", jitter: 600}
     tasks:
       - {name: news_cctv, job: data_collect.jobs.news_cctv, timeout: 300, retries: 2}
       - {name: news_cctv_verify, job: data_collect.jobs.news_cctv, fn: run_verify,
@@ -266,14 +291,10 @@ pipelines:
          fn: run_verify, timeout: 300, retries: 0}
       - {name: news_regulator_verify, job: data_collect.jobs.news_regulator,
          fn: run_verify, timeout: 600, retries: 0}
-      # 只读别名快照、必达（不依赖 verify 产出）；不设 depends_on 以免 verify raise 时被跳过；
-      # input-order 使其仍排在 news_daily 末位运行（计数新鲜）
-      - {name: news_report, job: data_collect.jobs.news_report,
-         timeout: 120, retries: 0}
 
   # 个股新闻 22:00——全市场逐票扫描(每票10条) + 自然日归档重放 verify
   news_stock:
-    schedule: {hour: 22, minute: 0, timezone: "Asia/Shanghai"}
+    schedule: {hour: 22, minute: 0, timezone: "Asia/Shanghai", jitter: 600}
     tasks:
       - {name: news_stock, job: data_collect.jobs.news_stock, timeout: 7200, retries: 1}
       - {name: news_stock_verify, job: data_collect.jobs.news_stock, fn: run_verify,
@@ -281,7 +302,7 @@ pipelines:
 
   # 美国政策/公司文件 每日 05:30（美股收盘+美东下午披露高峰后；需代理环境）
   news_us:
-    schedule: {hour: 5, minute: 30, timezone: "Asia/Shanghai"}
+    schedule: {hour: 5, minute: 30, timezone: "Asia/Shanghai", jitter: 600}
     notify: on_failure
     tasks:
       - {name: news_us, job: data_collect.jobs.news_us, timeout: 300, retries: 1}

@@ -26,6 +26,13 @@ _TEST_RSS = {
 }
 
 
+def test_rss_sources_include_pbc_but_not_miit_search_api():
+    """工信部已迁入官方搜索 API，不能再由失效历史 RSS 重复拉取。"""
+    sources = set(npo._rss_sources())
+    assert "pbc_news" in sources
+    assert "miit_policy" not in sources
+
+
 def _entry(title="国务院关于印发《提振消费方案》的通知",
            link="https://www.gov.cn/zhengce/1.htm", guid=None,
            summary="方案提出支持贵州茅台等消费龙头……",
@@ -123,6 +130,7 @@ def env(monkeypatch):
         return e.cjzc
 
     monkeypatch.setattr(npo, "_rss_sources", lambda: dict(_TEST_RSS))
+    monkeypatch.setattr(npo.source_registry, "is_enabled", lambda source: True)
     monkeypatch.setattr(npo, "_fetch_rss_entries", fake_rss)
     monkeypatch.setattr(npo, "_fetch_cjzc", fake_cjzc)
     monkeypatch.setattr(npo, "_now",
@@ -153,12 +161,50 @@ def test_run_merges_four_sources(env):
     assert "政策:" in summary and "入库新增 4" in summary
 
 
+def test_run_skips_disabled_cjzc_source(env, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        npo.source_registry, "is_enabled", lambda source: source != "em_cjzc")
+    monkeypatch.setattr(
+        npo, "_fetch_cjzc", lambda: calls.append("em_cjzc") or env.cjzc)
+
+    summary = npo.run()
+
+    assert calls == []
+    assert "em_cjzc" not in {d["source"] for d in env.calls.bulk[0]}
+    assert "入库新增 3" in summary
+
+
 def test_run_isolates_failed_source_and_alerts(env):
     env.rss["stats"] = RuntimeError("RSS HTTP 503")
     summary = npo.run()
     assert "stats 失败" in summary and "失败源[stats]" in summary
     assert len(env.calls.bulk[0]) == 3                   # 其余三源照常
     assert len(env.calls.alerts) == 1                    # 单源失败告警一次
+
+
+def test_run_transient_timeout_recovers_without_alert(env, monkeypatch):
+    """stats 首次读取超时但重试恢复 → 照常入库且不报错。"""
+    from requests.exceptions import ReadTimeout
+
+    original_fetch = npo._fetch_rss_entries
+    attempts = 0
+
+    def flaky(url, **kwargs):
+        nonlocal attempts
+        if url == _TEST_RSS["stats"].url:
+            attempts += 1
+            if attempts == 1:
+                raise ReadTimeout("read timed out")
+        return original_fetch(url, **kwargs)
+
+    monkeypatch.setattr(npo, "_fetch_rss_entries", flaky)
+    monkeypatch.setattr(npo.sa.time, "sleep", lambda seconds: None)
+    summary = npo.run()
+    assert "stats 失败" not in summary
+    assert env.calls.alerts == []
+    assert "stats" in {d["source"] for d in env.calls.bulk[0]}
+    assert attempts == 2
 
 
 def test_run_isolates_hanging_source(env, monkeypatch):

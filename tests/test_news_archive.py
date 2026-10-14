@@ -24,7 +24,9 @@ def paths(tmp_path, monkeypatch):
     nas = tmp_path / "nas"
     spool = tmp_path / "spool"
     monkeypatch.setattr(na, "get_news_config",
-                        lambda: {"archive_base": str(nas), "spool_dir": str(spool)})
+                        lambda: {"archive_base": str(nas),
+                                 "archive_base_posix": str(nas),
+                                 "spool_dir": str(spool)})
     alerts = []
     monkeypatch.setattr(na, "send_dingtalk", lambda msg: alerts.append(msg))
     return SimpleNamespace(nas=nas, spool=spool, alerts=alerts,

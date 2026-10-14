@@ -18,21 +18,37 @@ sources:
     headers: browser
     note: 中国政府网-最新政策
   - id: govcn_gwy
-    adapter: rss
+    adapter: api
     channel: policy
-    job: news_policy
-    url: https://www.gov.cn/guowuyuan/rss.xml
+    job: news_regulator
+    url: https://sousuo.www.gov.cn/search-gov/data
     headers: browser
-    note: 中国政府网-国务院
+    timeout: 90
+    health_profile: event
+    note: 国务院文件库官方接口；2026-10-14 替换失效旧 RSS，source/归档不变
   - id: stats
     adapter: rss
     channel: policy
     job: news_policy
     url: https://www.stats.gov.cn/sj/zxfb/rss.xml
     headers: browser
-    enabled: false   # 2026-07-16 起源头挂死（60s 超时，每小时告警刷屏）；恢复后
-                     # `manage_sources.py test stats` 冒烟通过再打开（2026-07-23 停）
+    timeout: 90
+    # 2026-07-16 曾源头挂死停用；2026-07-27 健康探测冒烟(500条正常)确认恢复→重启用。若再挂按同法停。
     note: 国家统计局-最新发布
+  - id: pbc_news
+    adapter: rss
+    channel: policy
+    job: news_policy
+    url: https://www.pbc.gov.cn/goutongjiaoliu/113456/2986536/index.html
+    headers: browser
+    health_profile: event
+    note: 中国人民银行官方 RSS
+  - id: em_cjzc
+    adapter: akshare
+    channel: media
+    job: news_policy
+    health_profile: continuous
+    note: 东财财经早餐（既有代码源，登记健康和开关）
 
   # ================= news_us（每日 05:30，全部经 us 代理）=================
   - id: fed
@@ -68,6 +84,7 @@ sources:
     headers: browser
     note: 纽约时报经济
   - id: wsj_markets
+    enabled: false  # 2026-09-07：官方 RSS 冻结于 2025-01；周探测候选，不删历史
     adapter: rss
     channel: us_news
     job: news_us
@@ -76,6 +93,7 @@ sources:
     headers: browser
     note: 华尔街日报市场（付费墙只给标题）
   - id: wsj_business
+    enabled: false  # 2026-09-07：官方 RSS 冻结于 2025-01；周探测候选
     adapter: rss
     channel: us_news
     job: news_us
@@ -84,6 +102,7 @@ sources:
     headers: browser
     note: 华尔街日报商业
   - id: wsj_world
+    enabled: false  # 2026-09-07：官方 RSS 冻结于 2025-01；周探测候选
     adapter: rss
     channel: us_news
     job: news_us
@@ -171,11 +190,13 @@ sources:
     route: /gov/ndrc/xwdt
     note: 发改委新闻发布
   - id: gov_bmwj
-    adapter: rsshub
+    adapter: api
     channel: policy
     job: news_regulator
-    route: /gov/zhengce/zhengceku/bmwj
-    note: 政策文件库-部委文件
+    url: https://sousuo.www.gov.cn/search-gov/data
+    timeout: 90
+    health_profile: event
+    note: 中国政府网部门文件库动态接口；2026-10-14 替换冻结静态页，source 不变
   - id: cls_red
     adapter: rsshub
     channel: flash
@@ -201,11 +222,12 @@ sources:
     route: /caixin/latest
     note: 财新最新
   - id: thepaper
-    adapter: rsshub
+    adapter: api
     channel: media
     job: news_regulator
-    route: /thepaper/featured
-    note: 澎湃首页
+    url: https://m.thepaper.cn/
+    timeout: 60
+    note: 澎湃官方首页与 newsDetail_forward 正文；保留旧 RSSHub guid，单篇隔离
   - id: guancha
     adapter: rsshub
     channel: media
@@ -261,17 +283,18 @@ sources:
     route: /wallstreetcn/live/global
     note: 华尔街见闻快讯
   - id: yicai
-    adapter: rsshub
+    adapter: api
     channel: media
     job: news_regulator
-    route: /yicai/headline
-    note: 第一财经头条
+    url: https://www.yicai.com/api/ajax/getAINews
+    note: 第一财经官网头条首屏（旧 RSSHub cid=48 冻结；保留 URL 原生 ID）
   - id: jiemian
     adapter: rsshub
     channel: media
     job: news_regulator
     route: /jiemian/lists/1
-    note: 界面要闻
+    enabled: false   # 2026-08-29 直连/RSSHub/39个mihomo节点均被源站 403，恢复后再启用
+    note: 界面要闻（源站WAF临时停用）
   - id: kr36_flash
     adapter: rsshub
     channel: media
@@ -289,6 +312,9 @@ sources:
     channel: media
     job: news_regulator
     route: /latepost
+    enabled: false   # RSSHub /latepost 路由稳定 503（实测连打3次全挂，gelonghui/根路径正常
+                     # → 单路由腐烂非整机）；涓流源(历史仅26篇)2026-07-21 起断，源级隔离但每轮
+                     # 告警刷屏。恢复后 manage_sources.py test latepost 冒烟通过再打开（2026-07-27 停）
     note: 晚点
   - id: huxiu
     adapter: rsshub
@@ -303,12 +329,48 @@ sources:
     route: /szse/notice
     note: 深交所公告
 
-  # ====== news_regulator：listpage 类（个性解析在代码 _LISTPAGES，此处登记开关）======
-  - id: csrc
+  # ====== news_regulator：官方直连（低频串行，个性解析在代码）======
+  - id: miit_policy
+    adapter: api
+    channel: policy
+    job: news_regulator
+    url: https://www.miit.gov.cn/search-front-server/api/search/info
+    headers: browser
+    timeout: 90
+    health_profile: event
+    note: 工信部“文件发布”官方搜索 API（旧 RSS columnId 已停在 2015 年）
+  - id: xinhua_fortune
+    adapter: listpage
+    channel: media
+    job: news_regulator
+    url: https://www.news.cn/fortunepro/mobile/index.html
+    timeout: 90
+    health_profile: continuous
+    note: 新华网财经移动版官方直抓
+  - id: sse_regulation
     adapter: listpage
     channel: policy
     job: news_regulator
-    note: 证监会列表页；WAF 敏感 pace 2s（超时/pace 在代码常量，二期适配器化再配置化）
+    url: https://www.sse.com.cn/regulation/
+    timeout: 180
+    health_profile: event
+    note: 上交所监管/自律/交易/复核（不含公司公告）
+  - id: bse_regulation
+    adapter: api
+    channel: policy
+    job: news_regulator
+    url: https://www.bse.cn/disclosure/supervise_dynamic.html
+    timeout: 180
+    health_profile: event
+    note: 北交所官方监管接口（不含公司公告）
+
+  # ====== news_regulator：旧列表页（个性解析在代码 _LISTPAGES，此处登记开关）======
+  - id: csrc
+    adapter: api
+    channel: policy
+    job: news_regulator
+    url: https://www.csrc.gov.cn/csrc/c100028/common_xq_list.shtml
+    note: 证监会当前动态要闻接口含正文；2026-10-14 替换冻结静态页
   - id: mof
     adapter: listpage
     channel: policy

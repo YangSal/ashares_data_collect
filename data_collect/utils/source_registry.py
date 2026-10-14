@@ -38,6 +38,7 @@ CHANNELS = ("flash", "cctv", "policy", "media", "report", "announcement",
             "stock", "us_policy", "us_filing", "us_news", "intl_news")
 JOBS = ("news_flash", "news_cctv", "news_policy", "news_regulator",
         "news_us", "news_announcement", "news_stock")
+HEALTH_PROFILES = ("continuous", "business", "daily", "event")
 PROXIES = {"us": "us_proxy"}   # 命名代理 → config.yaml news 段的键（见 _resolve_proxy）
 _DEFAULT_TIMEOUT = 45          # 单源 HTTP 超时缺省（dataclass 与 _to_sources 共用）
 
@@ -53,7 +54,8 @@ _ID_RE = re.compile(r"^[a-z0-9_]+$")
 _TOP_KEYS = {"version", "defaults", "sources"}
 _DEFAULT_KEYS = {"enabled", "timeout"}
 _SOURCE_KEYS = {"id", "adapter", "channel", "job", "url", "route", "proxy",
-                "headers", "timeout", "enabled", "note"}
+                "headers", "timeout", "enabled", "note", "health_profile",
+                "stale_hours"}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -66,10 +68,13 @@ class Source:
     url: str = ""
     route: str = ""
     proxy_url: str = ""                                   # 空=直连
+    proxy_name: str = ""      # 声明的命名代理（原始值；与解析结果并存，供 proxy_missing 判定）
     headers: dict = dataclasses.field(default_factory=dict)
     timeout: int = _DEFAULT_TIMEOUT   # HTTP 超时，已接线（三期）：feed 类经 source_adapters 生效
     enabled: bool = True
     note: str = ""
+    health_profile: str = ""
+    stale_hours: float | None = None
 
 
 def _validate(data) -> List[str]:
@@ -119,6 +124,18 @@ def _validate(data) -> List[str]:
         if "headers" in src and src["headers"] not in HEADER_SETS:
             errors.append(f"{where}({sid}) headers 非法: {src['headers']!r}"
                           f"（可用: {tuple(HEADER_SETS)}）")
+        profile = src.get("health_profile")
+        if profile is not None and profile not in HEALTH_PROFILES:
+            errors.append(f"{where}({sid}) health_profile 非法: {profile!r}"
+                          f"（可用: {HEALTH_PROFILES}）")
+        if "stale_hours" in src:
+            value = src.get("stale_hours")
+            try:
+                hours = float(value)
+            except (TypeError, ValueError):
+                hours = 0.0
+            if isinstance(value, bool) or hours <= 0:
+                errors.append(f"{where}({sid}) stale_hours 应为正数: {value!r}")
     return errors
 
 
@@ -137,10 +154,15 @@ def _resolve_proxy(name) -> str:
 
     name 已经 schema 校验 ∈ PROXIES（load_all 先 validate）；按名查键，加第二个代理
     （如 eu）只需在 PROXIES 加一行，不会静默落到 us_proxy（评审：半成品命名索引）。
+    `news.proxy_enabled: false`（应急总开关，Phase A4）→ 全部命名代理解析为空，
+    即全部代理源在本节点让位（配合 proxy_missing 跳过语义）。
     """
     if not name:
         return ""
-    return str(get_news_config().get(PROXIES[name]) or "").strip()
+    news_cfg = get_news_config()
+    if not news_cfg.get("proxy_enabled", True):
+        return ""
+    return str(news_cfg.get(PROXIES[name]) or "").strip()
 
 
 def _to_sources(data) -> List[Source]:
@@ -152,10 +174,14 @@ def _to_sources(data) -> List[Source]:
         channel=src["channel"], job=src["job"],
         url=str(src.get("url") or ""), route=str(src.get("route") or ""),
         proxy_url=_resolve_proxy(src.get("proxy")),
+        proxy_name=str(src.get("proxy") or ""),
         headers=dict(HEADER_SETS.get(src.get("headers"), {})),
         timeout=int(src.get("timeout", d_timeout)),
         enabled=bool(src.get("enabled", d_enabled)),
         note=str(src.get("note") or ""),
+        health_profile=str(src.get("health_profile") or ""),
+        stale_hours=(float(src["stale_hours"])
+                     if src.get("stale_hours") is not None else None),
     ) for src in data.get("sources") or []]
 
 
@@ -211,6 +237,16 @@ def get_source(source_id: str) -> Source:
         if s.id == source_id:
             return s
     raise KeyError(f"注册表无此源: {source_id!r}")
+
+
+def proxy_missing(source: Source) -> bool:
+    """声明了命名代理但本节点解析不到（键未配置 / proxy_enabled=false）→ True。
+
+    多节点让位语义（Phase A4）：无代理节点遇代理源不硬试直连（必失败徒增告警），
+    跳过让给有代理能力的节点；重叠采集由 create-only 幂等兜底。调用方（job 采集
+    循环）据此跳过并计 skipped，不入失败集不告警。
+    """
+    return bool(source.proxy_name) and not source.proxy_url
 
 
 def is_enabled(source_id: str) -> bool:

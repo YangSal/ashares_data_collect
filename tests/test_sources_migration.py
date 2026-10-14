@@ -13,8 +13,16 @@ from data_collect.utils import source_registry as sr
 _FROZEN = {
     # news_policy（url, channel, job）
     "govcn_policy": ("https://www.gov.cn/pushinfo/v150203/rss.xml", "policy", "news_policy"),
-    "govcn_gwy": ("https://www.gov.cn/guowuyuan/rss.xml", "policy", "news_policy"),
+    # 2026-10-14 官方入口修复：源 ID/归档目录不变，国务院归官方监管采集链。
+    "govcn_gwy": ("https://sousuo.www.gov.cn/search-gov/data", "policy", "news_regulator"),
     "stats": ("https://www.stats.gov.cn/sj/zxfb/rss.xml", "policy", "news_policy"),
+    "pbc_news": (
+        "https://www.pbc.gov.cn/goutongjiaoliu/113456/2986536/index.html",
+        "policy", "news_policy"),
+    "miit_policy": (
+        "https://www.miit.gov.cn/search-front-server/api/search/info",
+        "policy", "news_regulator"),
+    "em_cjzc": (None, "media", "news_policy"),
     # news_us
     "fed": ("https://www.federalreserve.gov/feeds/press_all.xml", "us_policy", "news_us"),
     "sec_8k": ("https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent"
@@ -33,12 +41,20 @@ _FROZEN = {
                     "us_news", "news_us"),
     # news_regulator rsshub（route, channel, job）
     "ndrc": ("/gov/ndrc/xwdt", "policy", "news_regulator"),
-    "gov_bmwj": ("/gov/zhengce/zhengceku/bmwj", "policy", "news_regulator"),
+    "gov_bmwj": ("https://sousuo.www.gov.cn/search-gov/data",
+                 "policy", "news_regulator"),
+    "xinhua_fortune": ("https://www.news.cn/fortunepro/mobile/index.html",
+                       "media", "news_regulator"),
+    "sse_regulation": ("https://www.sse.com.cn/regulation/",
+                       "policy", "news_regulator"),
+    "bse_regulation": (
+        "https://www.bse.cn/disclosure/supervise_dynamic.html",
+        "policy", "news_regulator"),
     "cls_red": ("/cls/telegraph/red", "flash", "news_regulator"),
     "gelonghui": ("/gelonghui/live", "flash", "news_regulator"),
     "cls_depth": ("/cls/depth/1000", "media", "news_regulator"),
     "caixin": ("/caixin/latest", "media", "news_regulator"),
-    "thepaper": ("/thepaper/featured", "media", "news_regulator"),
+    "thepaper": ("https://m.thepaper.cn/", "media", "news_regulator"),
     "guancha": ("/guancha/headline", "media", "news_regulator"),
     "ckxx": ("/cankaoxiaoxi/column/zhongguo", "media", "news_regulator"),
     "cctv_world": ("/cctv/world", "media", "news_regulator"),
@@ -48,7 +64,7 @@ _FROZEN = {
     "em_report_stock": ("/eastmoney/report/stock", "report", "news_regulator"),
     "wallstreetcn_news": ("/wallstreetcn/news/global", "media", "news_regulator"),
     "wallstreetcn_live": ("/wallstreetcn/live/global", "media", "news_regulator"),
-    "yicai": ("/yicai/headline", "media", "news_regulator"),
+    "yicai": ("https://www.yicai.com/api/ajax/getAINews", "media", "news_regulator"),
     "jiemian": ("/jiemian/lists/1", "media", "news_regulator"),
     "kr36_flash": ("/36kr/newsflashes", "media", "news_regulator"),
     "kr36_hot": ("/36kr/hot-list", "media", "news_regulator"),
@@ -56,7 +72,7 @@ _FROZEN = {
     "huxiu": ("/huxiu/article", "media", "news_regulator"),
     "szse_notice": ("/szse/notice", "policy", "news_regulator"),
     # news_regulator listpage（无 url/route；channel, job）
-    "csrc": (None, "policy", "news_regulator"),
+    "csrc": ("https://www.csrc.gov.cn/csrc/c100028/common_xq_list.shtml", "policy", "news_regulator"),
     "mof": (None, "policy", "news_regulator"),
     "people": (None, "media", "news_regulator"),
     # 二期单源 job（akshare/api，无 url/route；id=归档目录名，同样不可变）
@@ -69,6 +85,32 @@ _FROZEN = {
 def test_real_registry_validates():
     """真实 sources.yaml 必须通过 schema 校验（本测试读真文件是有意的）。"""
     assert sr.validate_registry() == []
+
+
+def test_official_china_sources_registered():
+    """央行 RSS 与工信部文件发布 API 必须进入实际注册表。"""
+    by_id = {s.id: s for s in sr.load_all()}
+    assert (by_id["pbc_news"].adapter,
+            by_id["pbc_news"].channel) == ("rss", "policy")
+    assert by_id["pbc_news"].url == (
+        "https://www.pbc.gov.cn/goutongjiaoliu/113456/2986536/index.html")
+    assert (by_id["miit_policy"].adapter,
+            by_id["miit_policy"].channel,
+            by_id["miit_policy"].job) == (
+                "api", "policy", "news_regulator")
+    assert by_id["miit_policy"].url.endswith("/api/search/info")
+
+
+def test_direct_official_regulator_sources_registered():
+    """Gov 迁移保留 ID，新华/两交易所必须按官方直连适配器启用。"""
+    by_id = {s.id: s for s in sr.load_all()}
+    assert (by_id["gov_bmwj"].adapter, by_id["gov_bmwj"].url) == (
+        "api", "https://sousuo.www.gov.cn/search-gov/data")
+    assert (by_id["xinhua_fortune"].adapter,
+            by_id["xinhua_fortune"].health_profile) == (
+                "listpage", "continuous")
+    assert by_id["sse_regulation"].adapter == "listpage"
+    assert by_id["bse_regulation"].adapter == "api"
 
 
 def test_migrated_sources_intact():
@@ -88,7 +130,10 @@ def test_migrated_sources_intact():
 # 本清单是"迁移不改行为"守门的显式例外——每项必须带停用原因与日期；
 # 源恢复并 `manage_sources.py test <id>` 冒烟通过后，恢复 enabled 并从此处移出。
 _OPS_DISABLED = {
-    "stats",   # 2026-07-16 起源头挂死（60s 超时每小时告警刷屏），2026-07-23 停用
+    "wsj_markets", "wsj_business", "wsj_world",  # 2026-09-07 RSS 冻结于 2025-01，保留周探测
+    # stats 2026-07-16 停、2026-07-27 健康探测冒烟恢复已重启用（移出本清单）
+    "latepost",  # RSSHub /latepost 路由稳定 503（涓流源，2026-07-21 起断），2026-07-27 停用
+    "jiemian",   # 源站WAF对直连/RSSHub/39个VPN节点均 403，2026-08-29 停用
 }
 
 

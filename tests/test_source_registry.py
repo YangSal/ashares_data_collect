@@ -21,6 +21,8 @@ sources:
     channel: media
     job: news_regulator
     route: /caixin/latest
+    health_profile: continuous
+    stale_hours: 12
   - id: csrc
     adapter: listpage
     channel: policy
@@ -65,10 +67,39 @@ def test_get_source(registry):
         sr.get_source("nope")
 
 
+def test_health_metadata_loads(registry):
+    caixin = sr.get_source("caixin")
+    assert caixin.health_profile == "continuous"
+    assert caixin.stale_hours == 12.0
+    assert sr.get_source("fed").health_profile == ""
+    assert sr.get_source("fed").stale_hours is None
+
+
 def test_is_enabled(registry):
     assert sr.is_enabled("fed") is True            # 启用源
     assert sr.is_enabled("csrc") is False           # enabled: false
     assert sr.is_enabled("nonexistent") is True     # 未登记=不管辖=保持启用（向后兼容）
+
+
+# ---------- 代理让位（Phase A4） ----------
+
+def test_proxy_missing_three_branches(registry, monkeypatch):
+    fed = sr.get_source("fed")
+    assert fed.proxy_name == "us"
+    assert sr.proxy_missing(fed) is False               # 声明+解析到 → 不缺
+    assert sr.proxy_missing(sr.get_source("caixin")) is False   # 未声明 → 不缺
+    monkeypatch.setattr(sr, "get_news_config", lambda: {})      # 本节点无 us_proxy
+    fed2 = sr.get_source("fed")
+    assert fed2.proxy_url == "" and sr.proxy_missing(fed2) is True   # 声明+解析不到 → 让位
+
+
+def test_proxy_enabled_false_blanks_all(registry, monkeypatch):
+    """news.proxy_enabled: false 应急总开关 → 命名代理全部解析为空（让位语义生效）。"""
+    monkeypatch.setattr(sr, "get_news_config",
+                        lambda: {"us_proxy": "http://127.0.0.1:7890",
+                                 "proxy_enabled": False})
+    fed = sr.get_source("fed")
+    assert fed.proxy_url == "" and sr.proxy_missing(fed) is True
 
 
 # ---------- schema 校验（fail-fast 逐规则） ----------
@@ -95,6 +126,9 @@ def test_validate_ok(registry):
     ("id: caixin", "id: fed"),                           # id 重复
     ("id: csrc", "id: CSRC-1"),                          # id 含非法字符
     ("note: 测试停用", "banana: 1"),                     # 未知源级键
+    ("health_profile: continuous", "health_profile: hourlyish"),
+    ("stale_hours: 12", "stale_hours: 0"),
+    ("stale_hours: 12", "stale_hours: nope"),
 ])
 def test_validate_rejects(tmp_path, mutation, fragment):
     assert _errors_of(tmp_path, _VALID.replace(mutation, fragment)) != []

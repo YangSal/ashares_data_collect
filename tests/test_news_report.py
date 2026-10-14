@@ -1,297 +1,342 @@
-"""news_report 单元测试：全 mock——不连 OpenSearch、不触网、不发真钉钉。
+"""18:00 新闻采集日报：全 mock，不连 OpenSearch/钉钉/SMTP。"""
 
-覆盖（计划 T10a + 设计决策）：
-- 正常日报：channel agg buckets → flash/cctv/marker 各数字正确、其他 channel 追加、
-  总数取 track_total_hits；pending 积压总数 + 最老滞留分钟（_now/_today 可 patch 固定时钟）；
-  send_dingtalk 恰调一次且发送串 == 返回串；
-- 索引未建（search_raw 抛 NotFoundError / 返回带 error）→ 摘要标"索引未建"、
-  其余字段 0/None，**仍发钉钉**（日报必达）；
-- agg 缺某 channel（只有 flash bucket）→ cctv/marker 记 0；
-- pending total=0 → "最老 - 分钟"（最老分钟 None 的渲染，锁定契约）；
-- send_dingtalk 抛异常 → job 不失败（guarded，返回摘要正常）。
-"""
-
-import datetime
+from datetime import datetime
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
-from opensearchpy.exceptions import NotFoundError
 
 from data_collect.jobs import news_report as nr
 
 
-_TODAY = datetime.date(2026, 7, 3)                     # 固定"今天"
-_NOW = datetime.datetime(2026, 7, 3, 20, 40, 0)        # 固定时钟（20:40 日报触发时刻）
+SH = ZoneInfo("Asia/Shanghai")
+START = datetime(2026, 8, 26, 18, 0, tzinfo=SH)
+END = datetime(2026, 8, 27, 18, 0, tzinfo=SH)
 
 
-def _agg_resp(buckets, total):
-    """构造 channel 聚合响应：buckets=[(channel, count), ...]，total=命中总数。"""
+def _agg_response():
     return {
-        "hits": {"total": {"value": total, "relation": "eq"}},
+        "hits": {"total": {"value": 18, "relation": "eq"}},
         "aggregations": {
-            "by_channel": {"buckets": [{"key": k, "doc_count": c} for k, c in buckets]}
+            "by_channel": {"buckets": [
+                {"key": "flash", "doc_count": 12},
+                {"key": "policy", "doc_count": 6},
+            ]},
+            "by_source": {"buckets": [
+                {"key": "cls", "doc_count": 10},
+                {"key": "jiemian", "doc_count": 8},
+            ]},
         },
     }
 
 
-def _pending_resp(total, oldest_fetch_time):
-    """构造 pending 积压响应（size=1 + fetch_time asc + track_total_hits）。"""
-    hits = ([{"_source": {"fetch_time": oldest_fetch_time}}]
-            if oldest_fetch_time is not None else [])
-    return {"hits": {"total": {"value": total, "relation": "eq"}, "hits": hits}}
+def _events():
+    return [
+        {
+            "id": 1, "event_time": "2026-08-27T01:00:00+08:00",
+            "event_type": "task_result", "severity": "info",
+            "pipeline": "news_hourly", "task": "news_policy", "source": None,
+            "success": 1, "skipped": 0, "duration": 3.2,
+            "summary": "新增 6", "details": "新增 6", "collector_node": "news-node",
+        },
+        {
+            "id": 2, "event_time": "2026-08-27T02:00:00+08:00",
+            "event_type": "task_result", "severity": "error",
+            "pipeline": "news_hourly", "task": "news_regulator", "source": "jiemian",
+            "success": 0, "skipped": 0, "duration": 9.5,
+            "summary": "RuntimeError: RSSHub HTTP 503",
+            "details": "RuntimeError: RSSHub HTTP 503\nTraceback full line",
+            "collector_node": "news-node",
+        },
+        {
+            "id": 4, "event_time": "2026-08-27T02:30:00+08:00",
+            "event_type": "source_health_transition", "severity": "info",
+            "pipeline": None, "task": None, "source": "latepost",
+            "success": None, "skipped": None, "duration": None,
+            "summary": "smoke: dead -> ok", "details": "recovered",
+            "collector_node": "news-node",
+        },
+        {
+            "id": 3, "event_time": "2026-08-27T03:00:00+08:00",
+            "event_type": "alert", "severity": "warning",
+            "pipeline": "news_hourly", "task": "news_regulator", "source": "jiemian",
+            "success": None, "skipped": None, "duration": None,
+            "summary": "RuntimeError: RSSHub HTTP 503",
+            "details": "RuntimeError: RSSHub HTTP 503\nsecond occurrence detail",
+            "collector_node": "news-node",
+        },
+    ]
+
+
+def _health():
+    return {
+        "summary": {
+            "healthy": 2, "failover": 1, "warning": 1,
+            "failed": 0, "unknown": 1,
+        },
+        "sources": [
+            {"source": "healthy_media", "enabled": True,
+             "profile": "continuous", "overall": "healthy",
+             "freshness": "fresh", "smoke": "ok",
+             "transport": "primary", "last_data_time": "2026-08-27 17:55:00",
+             "age_hours": 0.1, "detail": ""},
+            {"source": "healthy_event", "enabled": True,
+             "profile": "event", "overall": "healthy",
+             "freshness": "not_applicable", "smoke": "ok",
+             "transport": "not_applicable", "last_data_time": None,
+             "age_hours": None, "detail": ""},
+            {"source": "em_report_stock", "enabled": True,
+             "profile": "business", "overall": "failover",
+             "freshness": "fresh", "smoke": "ok", "transport": "failover",
+             "last_data_time": "2026-08-27 17:00:00", "age_hours": 1,
+             "detail": "RSSHub failover"},
+            {"source": "thepaper", "enabled": True,
+             "profile": "continuous", "overall": "warning",
+             "freshness": "stale", "smoke": "ok",
+             "transport": "not_applicable",
+             "last_data_time": "2026-08-26 12:00:00", "age_hours": 30,
+             "detail": ""},
+            {"source": "unknown_source", "enabled": True,
+             "profile": "continuous", "overall": "unknown",
+             "freshness": "unknown", "smoke": "not_run",
+             "transport": "not_applicable", "last_data_time": None,
+             "age_hours": None, "detail": ""},
+            {"source": "latepost", "enabled": False,
+             "profile": "continuous", "overall": "disabled",
+             "freshness": "unknown", "smoke": "ok",
+             "transport": "not_applicable", "last_data_time": None,
+             "age_hours": None, "detail": "recovered"},
+        ],
+        "recovered_candidates": ["latepost"],
+        "transport": {"primary": 20, "failover": 3, "failed": 0},
+    }
+
+
+def test_collection_metrics_use_fetch_time_half_open_window(monkeypatch):
+    searches = []
+    responses = [
+        _agg_response(),
+        {"hits": {"total": {"value": 4}, "hits": [
+            {"_source": {"fetch_time": "2026-08-26 19:00:00"}}
+        ]}},
+    ]
+    monkeypatch.setattr(nr, "_get_client", lambda: object())
+    monkeypatch.setattr(nr, "_search_raw",
+                        lambda client, body: searches.append(body) or responses.pop(0))
+
+    metrics = nr._collection_metrics(START, END)
+
+    query_range = searches[0]["query"]["range"]["fetch_time"]
+    assert query_range == {"gte": "2026-08-26 18:00:00", "lt": "2026-08-27 18:00:00"}
+    assert searches[0]["aggs"]["by_source"]["terms"]["field"] == "source"
+    assert metrics["total"] == 18
+    assert metrics["channels"] == {"flash": 12, "policy": 6}
+    assert metrics["sources"] == {"cls": 10, "jiemian": 8}
+    assert metrics["pending"] == 4
+    assert metrics["pending_oldest"] == "2026-08-26 19:00:00"
+
+
+def test_report_contains_task_stats_deduplicated_errors_and_full_timeline(monkeypatch):
+    monkeypatch.setattr(nr, "get_news_config",
+                        lambda: {"digest": {"dingtalk_max_chars": 18000}})
+    metrics = {
+        "total": 18, "channels": {"flash": 12, "policy": 6},
+        "sources": {"cls": 10, "jiemian": 8},
+        "pending": 4, "pending_oldest": "2026-08-26 19:00:00",
+    }
+
+    dingtalk, email = nr._build_report(
+        START, END, metrics, _events(), health=_health())
+
+    assert "2026-08-26 18:00" in dingtalk and "2026-08-27 18:00" in dingtalk
+    assert "采集 18" in dingtalk and "flash 12" in dingtalk and "jiemian 8" in dingtalk
+    assert "任务 2次" in dingtalk and "1成功" in dingtalk and "1失败" in dingtalk
+    assert "RSSHub HTTP 503" in dingtalk and "×2" in dingtalk
+    assert "来源健康 5启用：2健康，1降级，1异常，0失败，1未知" in dingtalk
+    assert "thepaper" in dingtalk and "em_report_stock" in dingtalk
+    assert "healthy_media" not in dingtalk
+    assert "RSSHub：主实例 20，备用成功 3，失败 0" in dingtalk
+    assert "恢复候选：latepost" in dingtalk
+    assert len(dingtalk) <= 18000
+    assert "完整事件时间线" in email
+    assert "来源健康全量明细" in email
+    assert "healthy_media" in email and "healthy_event" in email
+    assert "smoke: dead -> ok" in email
+    assert "Traceback full line" in email
+    assert "second occurrence detail" in email
+    assert email.index("2026-08-27T01:00") < email.index("2026-08-27T03:00")
+
+
+def test_source_health_metrics_loads_latest_and_window_observations(monkeypatch):
+    sources = [SimpleNamespace(id="caixin")]
+    latest = [{"source": "caixin", "check_type": "smoke"}]
+    window = [{"source": "caixin", "check_type": "transport"}]
+    captured = {}
+    monkeypatch.setattr(nr.source_registry, "load_all", lambda: sources)
+    monkeypatch.setattr(
+        nr.news_digest, "list_latest_source_observations", lambda: latest)
+    monkeypatch.setattr(
+        nr.news_digest, "list_source_observations",
+        lambda start, end: window)
+    monkeypatch.setattr(
+        nr.news_health, "build_health_snapshot",
+        lambda source_rows, latest_rows, window_rows, now: captured.update(
+            sources=source_rows, latest=latest_rows, window=window_rows,
+            now=now) or {"summary": {}})
+
+    result = nr._source_health_metrics(START, END, END)
+
+    assert result == {"summary": {}}
+    assert captured == {
+        "sources": sources, "latest": latest, "window": window, "now": END}
+
+
+def test_source_health_metrics_returns_query_error(monkeypatch, caplog):
+    monkeypatch.setattr(
+        nr.source_registry, "load_all",
+        lambda: (_ for _ in ()).throw(OSError(
+            "ledger http://alice:hunter2@host:9200/news?token=abc123 unavailable")))
+
+    error = nr._source_health_metrics(START, END, END)["query_error"]
+
+    assert "alice" not in error
+    assert "hunter2" not in error
+    assert "abc123" not in error
+    assert "http://host:9200/news" in error
+    assert "alice" not in caplog.text
+    assert "hunter2" not in caplog.text
+    assert "abc123" not in caplog.text
 
 
 @pytest.fixture
-def env(monkeypatch):
-    """全隔离环境：OpenSearch 检索、钉钉、时钟全打桩并记录调用。
+def delivery_env(monkeypatch):
+    state = {"dingtalk_status": "pending", "email_status": "pending"}
+    calls = SimpleNamespace(
+        dingtalk=[], email=[], marks=[], cleaned=[], cleaned_health=[])
+    monkeypatch.setattr(nr, "_now", lambda: END)
+    monkeypatch.setattr(nr.news_digest, "list_events", lambda start, end: _events())
+    monkeypatch.setattr(nr.news_digest, "get_delivery", lambda end: dict(state))
 
-    search_responses: 按调用顺序 pop 的响应队列（dict|Exception）——第 1 次
-    是 channel 聚合、第 2 次是 pending 积压；send_exc 置位时 send_dingtalk 抛错。
-    """
-    calls = SimpleNamespace(searches=[], sent=[])
-    e = SimpleNamespace(calls=calls, search_responses=[], send_exc=None)
+    def mark(end, channel, status, error=None):
+        state[f"{channel}_status"] = status
+        state[f"{channel}_error"] = error
+        calls.marks.append((channel, status, error))
 
-    def fake_search_raw(client, body, index=nr.osu.ALIAS):
-        calls.searches.append(body)
-        if not e.search_responses:
-            raise AssertionError("search_raw 调用次数超出预置响应")
-        resp = e.search_responses.pop(0)
-        if isinstance(resp, Exception):
-            raise resp
-        return resp
+    monkeypatch.setattr(nr.news_digest, "mark_delivery", mark)
+    monkeypatch.setattr(nr.news_digest, "cleanup_events",
+                        lambda before: calls.cleaned.append(before) or 0)
+    monkeypatch.setattr(nr.news_digest, "cleanup_source_observations",
+                        lambda before: calls.cleaned_health.append(before) or 0)
+    monkeypatch.setattr(nr.news_digest, "record_event", lambda *a, **kw: 1)
+    monkeypatch.setattr(nr, "_collection_metrics", lambda start, end: {
+        "total": 18, "channels": {"flash": 12}, "sources": {"cls": 18},
+        "pending": 0, "pending_oldest": None,
+    })
+    monkeypatch.setattr(nr, "_source_health_metrics",
+                        lambda start, end, now: _health())
+    monkeypatch.setattr(nr, "get_dingtalk_config",
+                        lambda: {"enabled": True, "webhook_token": "token"})
+    monkeypatch.setattr(nr, "get_news_config", lambda: {"digest": {
+        "email_recipient": "839833678@qq.com", "retention_days": 30,
+        "dingtalk_max_chars": 18000,
+    }})
+    monkeypatch.setattr(nr, "_load_config", lambda: {"wave3": {"email": {
+        "smtp_server": "smtp.qq.com", "smtp_port": 465,
+        "sender": "sender@qq.com", "app_key": "secret",
+        "recipients": ["must-not-use@example.com"],
+    }}})
+    monkeypatch.setattr(nr, "send_dingtalk_immediate",
+                        lambda message: calls.dingtalk.append(message) or True)
+    monkeypatch.setattr(nr, "send_email",
+                        lambda subject, body, cfg, recipients: calls.email.append(
+                            (subject, body, cfg, recipients)))
+    return state, calls
 
-    def fake_send(msg):
-        calls.sent.append(msg)
-        if e.send_exc is not None:
-            raise e.send_exc
 
-    monkeypatch.setattr(nr.osu, "get_client", lambda: object())
-    monkeypatch.setattr(nr.osu, "search_raw", fake_search_raw)
-    monkeypatch.setattr(nr, "send_dingtalk", fake_send)
-    monkeypatch.setattr(nr, "_today", lambda: _TODAY)
-    monkeypatch.setattr(nr, "_now", lambda: _NOW)
-    # 默认向量启用（不依赖真 config；vec_deferred 用例各自覆盖）
-    monkeypatch.setattr(nr, "get_news_config", lambda: {"embedding": {"enabled": True}})
-    return e
-
-
-# ---------- 正常日报 ----------
-
-def test_normal_report(env):
-    """agg 返回 flash/cctv/marker + pending total=5 最老 3 分钟 → 各数字正确、
-    send_dingtalk 恰一次、返回串 == 发送串。"""
-    env.search_responses = [
-        _agg_resp([("flash", 120), ("cctv", 15), ("marker", 2)], total=137),
-        # 最老 20:37 → 距 _NOW(20:40) 3 分钟
-        _pending_resp(total=5, oldest_fetch_time="2026-07-03 20:37:00"),
-    ]
-
+def test_run_sends_each_channel_once_to_fixed_recipient(delivery_env):
+    state, calls = delivery_env
     summary = nr.run()
+    assert "采集 18" in summary
+    assert len(calls.dingtalk) == 1
+    assert len(calls.email) == 1
+    assert calls.email[0][3] == ["839833678@qq.com"]
+    assert state["dingtalk_status"] == "sent"
+    assert state["email_status"] == "sent"
+    assert calls.cleaned
+    assert calls.cleaned_health == calls.cleaned
 
-    assert "新闻日报 2026-07-03" in summary
-    assert "总 137" in summary
-    assert "flash 120" in summary and "cctv 15" in summary and "marker 2" in summary
-    assert "pending 5" in summary
-    assert "最老 3 分钟" in summary
-    # 日报必达：恰发一次，且发送串 == 返回串
-    assert len(env.calls.sent) == 1
-    assert env.calls.sent[0] == summary
+
+def test_retry_only_resends_failed_email(delivery_env, monkeypatch):
+    state, calls = delivery_env
+
+    def fail_email(*args):
+        raise RuntimeError("smtp timeout")
+
+    monkeypatch.setattr(nr, "send_email", fail_email)
+    with pytest.raises(RuntimeError, match="email"):
+        nr.run()
+    assert state["dingtalk_status"] == "sent"
+    assert state["email_status"] == "failed"
+    assert len(calls.dingtalk) == 1
+
+    monkeypatch.setattr(nr, "send_email",
+                        lambda subject, body, cfg, recipients: calls.email.append(
+                            (subject, body, cfg, recipients)))
+    nr.run()
+    assert len(calls.dingtalk) == 1
+    assert len(calls.email) == 1
+    assert state["email_status"] == "sent"
 
 
-def test_vec_deferred_note(env, monkeypatch):
-    """向量禁用（news.embedding.enabled=false）→ pending 段标"向量已禁用,留待补算"
-    （防大额 pending 被误读为积压故障；用户 2026-07-08 决定省储存延迟向量）。"""
-    monkeypatch.setattr(nr, "get_news_config",
-                        lambda: {"embedding": {"enabled": False}})
-    env.search_responses = [
-        _agg_resp([("flash", 3)], total=3),
-        _pending_resp(total=99999, oldest_fetch_time="2026-07-03 20:37:00"),
-    ]
+def test_retry_only_resends_failed_dingtalk(delivery_env, monkeypatch):
+    state, calls = delivery_env
 
+    def fail_dingtalk(message):
+        raise RuntimeError("webhook timeout")
+
+    monkeypatch.setattr(nr, "send_dingtalk_immediate", fail_dingtalk)
+    with pytest.raises(RuntimeError, match="dingtalk"):
+        nr.run()
+    assert state["dingtalk_status"] == "failed"
+    assert state["email_status"] == "sent"
+    assert len(calls.email) == 1
+
+    monkeypatch.setattr(nr, "send_dingtalk_immediate",
+                        lambda message: calls.dingtalk.append(message) or True)
+    nr.run()
+    assert len(calls.dingtalk) == 1
+    assert len(calls.email) == 1
+    assert state["dingtalk_status"] == "sent"
+
+
+def test_disabled_node_sends_neither_channel(delivery_env, monkeypatch):
+    state, calls = delivery_env
+    monkeypatch.setattr(nr, "get_dingtalk_config", lambda: {"enabled": False})
     summary = nr.run()
-
-    assert "向量已禁用" in summary and "pending 99999" in summary
-    assert "最老" not in summary
-
-
-def test_fixed_channels_include_announcement_and_stock(env):
-    """回归锚点（审核#8）：announcement/stock 属固定上报——bucket 缺失补 0 可见，
-    否则 news_announcement/news_stock 整条管线静默挂掉时日报无任何异常信号
-    （stock 22:00 才入库、按 pub_time 口径当日恒近零，更需要 0 行兜底可见）。"""
-    env.search_responses = [
-        _agg_resp([("flash", 120)], total=120),          # 其余 channel 全缺
-        _pending_resp(total=0, oldest_fetch_time=None),
-    ]
-
-    summary = nr.run()
-
-    assert "announcement 0" in summary and "stock 0" in summary
-    assert "cctv 0" in summary and "marker 0" in summary
+    assert "静默节点" in summary
+    assert calls.dingtalk == [] and calls.email == []
+    assert state["dingtalk_status"] == "pending"
 
 
-def test_agg_query_shape_and_date_window(env):
-    """channel 聚合查询：pub_time range 当日 [00:00:00, 23:59:59]、by_channel terms、
-    size=0、track_total_hits。"""
-    env.search_responses = [
-        _agg_resp([("flash", 1)], total=1),
-        _pending_resp(total=0, oldest_fetch_time=None),
-    ]
+def test_opensearch_failure_is_visible_in_both_reports(delivery_env, monkeypatch):
+    state, calls = delivery_env
+    monkeypatch.setattr(nr, "_collection_metrics",
+                        lambda start, end: (_ for _ in ()).throw(RuntimeError("cluster timeout")))
+    nr.run()
+    assert "OpenSearch查询失败" in calls.dingtalk[0]
+    assert "cluster timeout" in calls.email[0][1]
+
+
+def test_health_query_failure_is_visible_without_blocking_delivery(
+        delivery_env, monkeypatch):
+    state, calls = delivery_env
+    monkeypatch.setattr(
+        nr, "_source_health_metrics",
+        lambda start, end, now: {"query_error": "OSError: ledger locked"})
 
     nr.run()
 
-    agg_body = env.calls.searches[0]
-    rng = agg_body["query"]["range"]["pub_time"]
-    assert rng["gte"] == "2026-07-03 00:00:00"
-    assert rng["lte"] == "2026-07-03 23:59:59"
-    assert agg_body["aggs"]["by_channel"]["terms"]["field"] == "channel"
-    assert agg_body["size"] == 0
-    assert agg_body["track_total_hits"] is True
-
-
-def test_run_date_explicit(env):
-    """显式 run_date（YYYYMMDD）→ 摘要日期与查询窗口按该日，不用 _today。"""
-    env.search_responses = [
-        _agg_resp([("flash", 3)], total=3),
-        _pending_resp(total=0, oldest_fetch_time=None),
-    ]
-
-    summary = nr.run(run_date="20260701")
-
-    assert "新闻日报 2026-07-01" in summary
-    assert env.calls.searches[0]["query"]["range"]["pub_time"]["gte"] == "2026-07-01 00:00:00"
-
-
-# ---------- 索引未建 ----------
-
-def test_index_not_built_notfound_still_sends(env):
-    """channel 聚合 search_raw 抛 NotFoundError（别名/索引未建）→ 摘要标"索引未建"、
-    字段 0/None，仍发钉钉（日报必达）。"""
-    env.search_responses = [NotFoundError(404, "index_not_found_exception", {})]
-
-    summary = nr.run()
-
-    assert "索引未建" in summary
-    assert "总 0" in summary
-    assert "flash 0" in summary and "cctv 0" in summary and "marker 0" in summary
-    # 索引未建也发钉钉
-    assert len(env.calls.sent) == 1
-    assert env.calls.sent[0] == summary
-    # 索引未建时不应再打 pending 查询（聚合已判定索引缺失）
-    assert len(env.calls.searches) == 1
-
-
-def test_index_not_built_error_payload_still_sends(env):
-    """search_raw 返回带 error 载荷（部分部署以 200 + error 回）→ 同样"索引未建"仍发。"""
-    env.search_responses = [{"error": {"type": "index_not_found_exception"}}]
-
-    summary = nr.run()
-
-    assert "索引未建" in summary
-    assert len(env.calls.sent) == 1
-
-
-# ---------- 非索引缺失的查询异常：不误报"索引未建" ----------
-
-def test_non_notfound_error_not_labeled_index_missing(env):
-    """query①（channel 聚合）正常，query②（pending）抛非 NotFound 错误（集群超时/查询错）
-    → 摘要**不**含"索引未建"、标"查询异常"，DingTalk 仍必达（日报不能因查询故障静默）。"""
-    env.search_responses = [
-        _agg_resp([("flash", 10)], total=10),          # query① 成功
-        RuntimeError("cluster read timeout"),          # query② 非 NotFound 失败
-    ]
-
-    summary = nr.run()   # 不抛
-
-    assert "索引未建" not in summary                   # 关键：不误报索引缺失
-    assert "查询异常" in summary
-    assert "RuntimeError" in summary                   # 摘要带异常类型名便于定位
-    # 查询故障日报仍必达
-    assert len(env.calls.sent) == 1
-    assert env.calls.sent[0] == summary
-
-
-def test_pending_notfound_still_index_missing(env):
-    """query① 成功、query②（pending）抛 NotFoundError（别名/索引确已缺失）→ 仍归"索引未建"
-    （NotFoundError 分支覆盖第二个查询，锁定与非 NotFound 分支的边界）。"""
-    env.search_responses = [
-        _agg_resp([("flash", 10)], total=10),
-        NotFoundError(404, "index_not_found_exception", {}),
-    ]
-
-    summary = nr.run()
-
-    assert "索引未建" in summary
-    assert "查询异常" not in summary
-    assert len(env.calls.sent) == 1
-
-
-# ---------- agg 缺 channel ----------
-
-def test_missing_channel_counts_zero(env):
-    """agg 只有 flash bucket → cctv/marker 记 0（缺失 channel 补 0，marker 也报）。"""
-    env.search_responses = [
-        _agg_resp([("flash", 42)], total=42),
-        _pending_resp(total=0, oldest_fetch_time=None),
-    ]
-
-    summary = nr.run()
-
-    assert "flash 42" in summary
-    assert "cctv 0" in summary
-    assert "marker 0" in summary
-
-
-def test_extra_channel_appended(env):
-    """出现固定三类之外的 channel（如 policy）→ 追加进摘要（不丢数据）。"""
-    env.search_responses = [
-        _agg_resp([("flash", 5), ("cctv", 3), ("marker", 1), ("policy", 7)], total=16),
-        _pending_resp(total=0, oldest_fetch_time=None),
-    ]
-
-    summary = nr.run()
-
-    assert "policy 7" in summary
-
-
-# ---------- pending 边界 ----------
-
-def test_pending_zero_oldest_dash(env):
-    """pending total=0 → 最老分钟 None 渲染为 "-"（锁定契约）。"""
-    env.search_responses = [
-        _agg_resp([("flash", 1)], total=1),
-        _pending_resp(total=0, oldest_fetch_time=None),
-    ]
-
-    summary = nr.run()
-
-    assert "pending 0" in summary
-    assert "最老 - 分钟" in summary
-
-
-def test_pending_malformed_fetch_time_dash(env):
-    """pending 最老 fetch_time 异形（解析失败）→ 最老分钟记 None → "-"。"""
-    env.search_responses = [
-        _agg_resp([("flash", 1)], total=1),
-        _pending_resp(total=3, oldest_fetch_time="not-a-time"),
-    ]
-
-    summary = nr.run()
-
-    assert "pending 3" in summary
-    assert "最老 - 分钟" in summary
-
-
-# ---------- send 异常 guarded ----------
-
-def test_send_failure_does_not_fail_job(env):
-    """send_dingtalk 抛异常 → job 不失败（guarded），返回摘要正常。"""
-    env.search_responses = [
-        _agg_resp([("flash", 1)], total=1),
-        _pending_resp(total=0, oldest_fetch_time=None),
-    ]
-    env.send_exc = RuntimeError("钉钉 webhook 超时")
-
-    summary = nr.run()   # 不抛
-
-    assert "新闻日报 2026-07-03" in summary
-    assert len(env.calls.sent) == 1   # 尝试发过（虽然抛错）
+    assert "来源健康查询失败" in calls.dingtalk[0]
+    assert "ledger locked" in calls.email[0][1]
+    assert state["dingtalk_status"] == "sent"
+    assert state["email_status"] == "sent"
