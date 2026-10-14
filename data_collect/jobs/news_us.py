@@ -109,10 +109,17 @@ def run(run_date: str | None = None, **kwargs) -> str:
 
     feeds = _rss_sources()                    # 每轮加载一次（子进程模型=天然热生效）
     sources = tuple(feeds)
+    # 代理让位（多节点 Phase A4）：声明了命名代理但本节点无该代理的源 → 跳过，
+    # 让给有代理能力的节点（不算失败不告警；重叠由 create-only 幂等兜底）
+    skipped_sources = [s for s in sources
+                       if source_registry.proxy_missing(feeds[s])]
+    active_sources = tuple(s for s in sources if s not in skipped_sources)
+    if skipped_sources:
+        logger.info(f"美国源让位跳过（本节点无代理）: {','.join(skipped_sources)}")
     envelopes_by_source: Dict[str, List[dict]] = {}
     failed_sources: List[str] = []
     errors: List[str] = []
-    for source in sources:
+    for source in active_sources:
         try:
             envelopes_by_source[source] = _collect_source(source, fetch_time, feeds)
         except Exception as exc:  # noqa: BLE001
@@ -120,7 +127,7 @@ def run(run_date: str | None = None, **kwargs) -> str:
             errors.append(_redact(f"{source}: {exc!r}"))   # 脱敏代理凭据（S5）
             logger.warning(f"美国源 {source} 采集失败（源级隔离，继续其余源）: "
                            f"{_redact(repr(exc))}")
-    if len(failed_sources) == len(sources):
+    if active_sources and len(failed_sources) == len(active_sources):
         raise RuntimeError(f"美国源全部采集失败（检查代理？）: {'; '.join(errors)}")
     if failed_sources:
         _alert(f"美国源 {','.join(failed_sources)} 本轮采集失败（其余源正常，"
@@ -147,12 +154,16 @@ def run(run_date: str | None = None, **kwargs) -> str:
 
     parts = []
     for source in sources:
-        if source in failed_sources:
+        if source in skipped_sources:
+            parts.append(f"{source} 让位")
+        elif source in failed_sources:
             parts.append(f"{source} 失败")
         else:
             parts.append(f"{source} {len(envelopes_by_source[source])}条"
                          f"(新{new_counts[source]})")
     summary = f"美国: {' '.join(parts)}, 入库新增 {ok} 重复 {dup}"
+    if skipped_sources:
+        summary += f", 让位跳过[{','.join(skipped_sources)}]（本节点无代理）"
     if failed_sources:
         summary += f", 失败源[{','.join(failed_sources)}]"
     logger.info(summary)

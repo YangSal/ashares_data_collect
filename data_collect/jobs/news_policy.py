@@ -254,14 +254,18 @@ def run(run_date: str | None = None, **kwargs) -> str:
     name_dict = _load_name_dict()
 
     rss_map = _rss_sources()                  # 每轮加载一次（子进程模型=天然热生效）
-    sources = tuple(rss_map) + (_CJZC_SOURCE,)
+    sources = tuple(rss_map)
+    if source_registry.is_enabled(_CJZC_SOURCE):
+        sources += (_CJZC_SOURCE,)
     envelopes_by_source: Dict[str, List[dict]] = {}
     failed_sources: List[str] = []
     errors: List[str] = []
     for source in sources:
         try:
-            envelopes_by_source[source] = _collect_source(
-                source, fetch_time, name_dict, rss_map)
+            envelopes_by_source[source] = sa.retry_transient(
+                lambda source=source: _collect_source(
+                    source, fetch_time, name_dict, rss_map),
+                label=f"政策源 {source}")
         except Exception as exc:  # noqa: BLE001
             failed_sources.append(source)
             errors.append(f"{source}: {exc!r}")
